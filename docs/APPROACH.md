@@ -2,11 +2,11 @@
 
 ## 1. Project Summary
 
-MedExtract AI takes an unstructured clinical/patient note and uses a local LLM (via Ollama) to extract only the information explicitly stated into a fixed JSON schema (chief complaint, symptoms, diagnosis, medical history, medications, procedures, follow-up, summary, risk indicators, urgency). The system must never invent, diagnose, or prescribe — extraction only, with everything traceable back to what's actually written.
+MedExtract AI takes an unstructured clinical/patient note and uses a local LLM (via Ollama) to extract only the information explicitly stated into a fixed JSON schema (chief complaint, symptoms, diagnosis, medical history, medications, procedures, follow-up, summary, risk indicators, urgency). The system must never invent, diagnose, or prescribe — extraction only, with everything traceable back to what's actually written. The extracted data is then shown to the doctor through a **Streamlit interface styled like a prescription/report**, not as raw JSON.
 
 ## 2. Audience
 
-**Doctors and medical staff** — the system is designed to help clinicians quickly track a patient's condition from unstructured notes (their own documentation, or a patient's self-report/journal entry) instead of re-reading everything by hand.
+**Doctors and medical staff** — the system is designed to help clinicians quickly track a patient's condition from unstructured notes (their own documentation, or a patient's self-report/journal entry) instead of re-reading everything by hand. The doctor-facing view is designed to look and feel familiar — like a prescription or clinical summary — rather than a technical JSON dump.
 
 **Note on the dataset:** the available dataset (`clinical_notes.csv` + `patient_diaries.csv`, from Kaggle's "Patient Diaries and Clinical Notes Dataset") is mostly patient self-report / journal-style text focused on mood and depression, not full clinical encounters. This means fields like `medications`, `procedures`, and `follow_up` will often correctly return `null` — that's expected behavior given the input, not a bug, and is treated as such throughout evaluation (Section 7).
 
@@ -15,7 +15,7 @@ MedExtract AI takes an unstructured clinical/patient note and uses a local LLM (
 Every output must be **checkable**, not just trusted:
 - **Grounded extraction** — every field is tagged with the sentence in the note that supports it, so a doctor can verify a claim in seconds instead of re-reading the note.
 - **Validation before anything is finalized** — malformed or schema-violating output is caught and retried automatically.
-- **Read-back before voice input is processed** — if input comes from speech, the system confirms what it heard before it's ever sent to extraction.
+- **A familiar, prescription-style presentation** — the doctor never has to read raw JSON; the same validated, grounded data is rendered in a clean, clinical-looking layout they can scan the way they'd scan any other patient document.
 
 ---
 
@@ -29,14 +29,13 @@ Every output must be **checkable**, not just trusted:
 | Structured output guardrail | Ollama's **`format: json`** mode | Baseline guarantee of parseable JSON (not schema-correctness) |
 | Schema validation | **Pydantic** | Models mirror the JSON schema exactly; used for both dev-time and runtime validation |
 | API layer | **FastAPI** | Single extraction endpoint; also a natural fit for later exposing the ICD-10 bonus route |
+| Doctor-facing UI | **Streamlit** | Renders the validated JSON as a prescription/report-style view, not raw JSON |
 | Evaluation | **pandas + scikit-learn** (`classification_report`, custom null-integrity check) | Two separate metrics, not one blended score (Section 7) |
 | ICD-10 bonus — code source | **NLM Clinical Tables API** (`clinicaltables.nlm.nih.gov`) | Free, no API key; returns ICD-10-CM codes for a given diagnosis text |
 | ICD-10 bonus — agent step | **MCP** (Model Context Protocol) — `mcp` Python SDK | Local MCP server exposes `icd10_lookup` (which internally calls the API); the extraction agent acts as an MCP client. Falls back to a direct code-side function call if a full MCP setup isn't feasible in time |
-| Speech-to-text | **`faster-whisper`** (local Whisper) | Runs locally on the M1; no audio leaves the machine |
-| Read-back / TTS | macOS built-in **`say`** command | Zero setup, already on the machine |
 | Version control | **Git + GitHub** | Repo already scaffolded (`README.md`, `docs/APPROACH.md`, `.gitignore`, `src/`, `notebooks/`, `data/`) |
 
-**Why these choices fit the constraints:** the core pipeline (Ollama, Whisper, `say`) runs entirely locally — no cloud API calls, no API keys, no cost, and nothing about the note itself leaves the machine, which matters for a *medical* project's privacy story and for staying within an M1 Air's resources. The one exception is the ICD-10 bonus, which calls a free public API for the diagnosis code lookup (see Phase 7) — everything else stays local.
+**Why these choices fit the constraints:** the core pipeline (Ollama, Pydantic, FastAPI) runs entirely locally — no cloud API calls, no API keys, no cost, and nothing about the note itself leaves the machine, which matters for a *medical* project's privacy story and for staying within an M1 Air's resources. The one exception is the ICD-10 bonus, which calls a free public API for the diagnosis code lookup (see Phase 7) — everything else stays local.
 
 ---
 
@@ -84,16 +83,18 @@ Placed after Phases 1-6 are stable, since it depends on a confirmed diagnosis al
 
 Given the dataset mostly yields a small, repetitive set of diagnoses (largely depression-related), this bonus is smaller in scope than it might sound.
 
-### Phase 8 — Speech-to-Text Input, With Guardrails (Optional Path)
-Voice is one *optional* way to get text into the pipeline — not a required path. The pipeline's real entry point is "clean note text," which can come from the dataset, typed input, or voice.
+### Phase 8 — Doctor-Facing Output: Streamlit Prescription-Style View
+This is the differentiator replacing voice input — instead of a doctor reading raw JSON, the validated, grounded extraction result is rendered as a clean, familiar, **prescription/clinical-report-style page** in Streamlit.
 
-**Guardrails before any transcript reaches the LLM** (using `faster-whisper`'s output):
-1. **Empty/garbage check** — if Whisper returns nothing or nonsense (silence, static), stop before sending anything to extraction.
-2. **Length/sanity check** — a suspiciously short transcript likely means a failed recording; flag it rather than process it.
-3. **Confidence check** — Whisper's per-segment confidence scores trigger a "please repeat" if too low, instead of silently proceeding.
-4. **Read-back confirmation** — the system speaks back what it understood via macOS `say` ("I heard: ...") before the transcript is finalized and sent to extraction.
-
-Only a transcript that passes all of this is treated the same as any other clean text input to Phase 3.
+1. **Input to this phase:** the final validated JSON from Phase 4/5 (plus the ICD-10 code from Phase 7, if present) — nothing new is extracted here, this is purely a presentation layer.
+2. **Layout, styled like a prescription pad / clinical summary:**
+   - Header area: patient/note reference, date (from the note if available)
+   - **Chief complaint & diagnosis** shown prominently, with the ICD-10 code next to the diagnosis if the bonus ran
+   - **Symptoms, medical history, medications, procedures, follow-up** laid out as labeled sections, in the order a doctor would expect to scan them — matching the visual rhythm of a real prescription/summary sheet rather than a flat form
+   - **Risk indicators / urgency** visually flagged (e.g. colored badge or highlighted line) so anything urgent is impossible to miss at a glance
+   - Fields that are genuinely `null` are shown as "Not mentioned in note" rather than left blank or hidden, so the doctor knows the system checked and found nothing, rather than wondering if it was missed
+3. **Grounding surfaced in the UI:** each displayed value is clickable/hoverable to reveal the exact source sentence from the note — bringing the "checkable, not just trusted" philosophy (Section 3) directly into what the doctor sees, not just into the underlying JSON.
+4. **Not a replacement for the API:** the FastAPI endpoint (Phase 5) remains the actual programmatic interface; Streamlit is a thin, separate front-end that calls it and renders the result. This keeps the core deliverable (API + validated JSON) intact regardless of how the UI evolves.
 
 ---
 
@@ -106,13 +107,14 @@ Only a transcript that passes all of this is treated the same as any other clean
 5. API endpoint (Phase 5) — FastAPI
 6. Evaluation — split metrics (Phase 6) — pandas/scikit-learn
 7. ICD-10 bonus (Phase 7) — NLM API + local MCP server & client
-8. Speech-to-text with guardrails, as an optional input path (Phase 8) — faster-whisper + macOS `say`
+8. Doctor-facing Streamlit view, styled like a prescription (Phase 8) — Streamlit, calling the Phase 5 API
 
 ---
 
 ## 7. What Makes This Approach Defensible
 
-- Every design choice ties back to a real requirement in the brief: grounding → "no hallucination"; validation/repair → schema compliance; split evaluation → honest measurement given the dataset's actual content; voice → the instructor's own example of a different approach.
+- Every design choice ties back to a real requirement in the brief: grounding → "no hallucination"; validation/repair → schema compliance; split evaluation → honest measurement given the dataset's actual content.
 - The doctor-facing audience is stated explicitly, along with an honest account of where the dataset currently falls short of full clinical documentation (no medications/procedures) — framed as a scoping decision, not an oversight.
 - The core pipeline is local, free, and requires no API key, which matters both technically (M1 Air resource limits) and narratively (privacy-first for a medical project). The ICD-10 bonus is the one deliberate exception — it calls a free public API — and that trade-off is stated explicitly rather than glossed over.
-- The core pipeline (Phases 1-6) is fully functional and gradeable without voice or the bonus — both are additive, not dependencies.
+- The prescription-style Streamlit view directly serves the stated audience: doctors get a familiar, scannable document instead of a technical JSON blob, with grounding built into the presentation itself, not buried in the data.
+- The core pipeline (Phases 1-6) is fully functional and gradeable without the UI or the bonus — both are additive, not dependencies.

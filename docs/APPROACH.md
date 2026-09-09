@@ -30,14 +30,13 @@ Every output must be **checkable**, not just trusted:
 | Schema validation | **Pydantic** | Models mirror the JSON schema exactly; used for both dev-time and runtime validation |
 | API layer | **FastAPI** | Single extraction endpoint; also a natural fit for later exposing the ICD-10 bonus route |
 | Evaluation | **pandas + scikit-learn** (`classification_report`, custom null-integrity check) | Two separate metrics, not one blended score (Section 7) |
-| ICD-10 bonus — code table | Public **ICD-10-CM CSV** (e.g. from CMS) | Local file, no external API call |
-| ICD-10 bonus — matching | **`rapidfuzz`** (fuzzy string matching) or sentence-embedding similarity | Deterministic lookup — the model never recalls a code from memory |
-| ICD-10 bonus — agent step | Ollama **tool/function calling** | Falls back to a direct code-side function call if the chosen model doesn't support tool calling reliably |
+| ICD-10 bonus — code source | **NLM Clinical Tables API** (`clinicaltables.nlm.nih.gov`) | Free, no API key; returns ICD-10-CM codes for a given diagnosis text |
+| ICD-10 bonus — agent step | **MCP** (Model Context Protocol) — `mcp` Python SDK | Local MCP server exposes `icd10_lookup` (which internally calls the API); the extraction agent acts as an MCP client. Falls back to a direct code-side function call if a full MCP setup isn't feasible in time |
 | Speech-to-text | **`faster-whisper`** (local Whisper) | Runs locally on the M1; no audio leaves the machine |
 | Read-back / TTS | macOS built-in **`say`** command | Zero setup, already on the machine |
 | Version control | **Git + GitHub** | Repo already scaffolded (`README.md`, `docs/APPROACH.md`, `.gitignore`, `src/`, `notebooks/`, `data/`) |
 
-**Why these choices fit the constraints:** everything runs locally (Ollama, Whisper, `say`, the ICD-10 lookup) — no cloud API calls anywhere in the pipeline, which matters both for a *medical* project's privacy story and for staying within an M1 Air's resources. Every library is free, well-documented, and has no API key/cost concerns.
+**Why these choices fit the constraints:** the core pipeline (Ollama, Whisper, `say`) runs entirely locally — no cloud API calls, no API keys, no cost, and nothing about the note itself leaves the machine, which matters for a *medical* project's privacy story and for staying within an M1 Air's resources. The one exception is the ICD-10 bonus, which calls a free public API for the diagnosis code lookup (see Phase 7) — everything else stays local.
 
 ---
 
@@ -71,12 +70,18 @@ Run the Final prompt across the full labeled eval set (pandas + scikit-learn) an
 - **Content-field accuracy** — for fields that usually have real values (symptoms, diagnosis, risk_indicators): standard accuracy against gold labels.
 - **Null-integrity check** — for fields that are usually absent (medications, procedures, follow_up): confirm the model correctly returns null when nothing is stated, and is correct on the rare cases when something is.
 
-### Phase 7 — Bonus: ICD-10 Tool-Calling
-Placed after Phases 1-6 are stable, since it depends on a confirmed diagnosis already existing.
-1. Local ICD-10-CM code table (CSV) + `rapidfuzz`-based lookup function.
-2. Exposed as a tool in Ollama's tool-calling format.
-3. After a diagnosis is validated, a short agent turn calls the tool to find the matching code — the model never recalls a code from memory.
-4. Fallback: if the local model doesn't support tool-calling reliably, call the lookup function directly in code (no agent turn) — same guarantee, simpler path.
+### Phase 7 — Bonus: ICD-10 Lookup via MCP + API
+Placed after Phases 1-6 are stable, since it depends on a confirmed diagnosis already existing. This directly implements the brief's own suggested bonus ("turn it into an agent with an MCP/tool call for ICD-10 lookup").
+
+1. **Code source: public ICD-10 API** — the **NLM Clinical Tables API** (`clinicaltables.nlm.nih.gov`, free, no key required) is queried with the diagnosis text and returns matching ICD-10-CM codes + descriptions. No local code table to download/maintain.
+2. **Lookup function:** a small Python function `icd10_lookup(diagnosis_text)` that calls the API and returns the top 1-3 candidate codes, with basic error handling for network failures/timeouts.
+3. **Wrap it as an MCP server:** using Python's `mcp` SDK, expose `icd10_lookup` as a proper MCP tool (name, description, input/output schema), running as a small local server process — the tool itself just happens to call an external API internally.
+4. **Agent as MCP client:** after a diagnosis is extracted and validated, the extraction agent connects to the local MCP server as a client, sees `icd10_lookup` is available, and calls it — the model decides to invoke the tool, same as standard tool-calling, through the standardized MCP interface.
+5. **Result attached to output:** the returned code + description get added to the final JSON as `icd10_codes`, tied to the diagnosis. The model never recalls a code from memory — only what the API actually returns.
+6. **Fallback:** if setting up a full MCP server isn't feasible in the timeline, call `icd10_lookup()` directly in code right after extraction (no agent/MCP layer) — same correctness guarantee, documented as a graceful simplification rather than a failure. If the API is unreachable at demo time, log the failure gracefully rather than blocking the rest of the pipeline.
+
+**Trade-off worth noting:** this is the one point in the pipeline that isn't fully local — the diagnosis text (not the full note) is sent to a public lookup service to get a code back. Worth a one-line acknowledgment in the write-up, since every other phase in this project is deliberately local-only.
+
 Given the dataset mostly yields a small, repetitive set of diagnoses (largely depression-related), this bonus is smaller in scope than it might sound.
 
 ### Phase 8 — Speech-to-Text Input, With Guardrails (Optional Path)
@@ -100,7 +105,7 @@ Only a transcript that passes all of this is treated the same as any other clean
 4. Runtime validation & repair loop (Phase 4) — Pydantic
 5. API endpoint (Phase 5) — FastAPI
 6. Evaluation — split metrics (Phase 6) — pandas/scikit-learn
-7. ICD-10 bonus (Phase 7) — rapidfuzz + Ollama tool calling
+7. ICD-10 bonus (Phase 7) — NLM API + local MCP server & client
 8. Speech-to-text with guardrails, as an optional input path (Phase 8) — faster-whisper + macOS `say`
 
 ---
@@ -109,5 +114,5 @@ Only a transcript that passes all of this is treated the same as any other clean
 
 - Every design choice ties back to a real requirement in the brief: grounding → "no hallucination"; validation/repair → schema compliance; split evaluation → honest measurement given the dataset's actual content; voice → the instructor's own example of a different approach.
 - The doctor-facing audience is stated explicitly, along with an honest account of where the dataset currently falls short of full clinical documentation (no medications/procedures) — framed as a scoping decision, not an oversight.
-- Every tool in the stack is free, local, and requires no API key — keeping the whole system privacy-preserving and cost-free to run, which matters both technically (M1 Air resource limits) and narratively (a medical project with no cloud dependency).
+- The core pipeline is local, free, and requires no API key, which matters both technically (M1 Air resource limits) and narratively (privacy-first for a medical project). The ICD-10 bonus is the one deliberate exception — it calls a free public API — and that trade-off is stated explicitly rather than glossed over.
 - The core pipeline (Phases 1-6) is fully functional and gradeable without voice or the bonus — both are additive, not dependencies.

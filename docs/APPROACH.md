@@ -2,109 +2,112 @@
 
 ## 1. Project Summary
 
-MedExtract AI takes an unstructured clinical note and uses a local LLM (via Ollama) to extract only the information explicitly stated in the note into a fixed JSON schema (chief complaint, symptoms, diagnosis, medical history, medications, procedures, follow-up, summary, risk indicators, urgency). The system must never invent, diagnose, or prescribe — extraction only. Output is validated against a schema, served through a small API, and evaluated on a labeled test set rather than judged by eye.
+MedExtract AI takes an unstructured clinical/patient note and uses a local LLM (via Ollama) to extract only the information explicitly stated into a fixed JSON schema (chief complaint, symptoms, diagnosis, medical history, medications, procedures, follow-up, summary, risk indicators, urgency). The system must never invent, diagnose, or prescribe — extraction only, with everything traceable back to what's actually written.
 
-**Design philosophy: verify-before-you-trust.** The real risk with AI extraction in healthcare isn't just accuracy — it's that confidently-wrong structured data looks identical to correct data once it's saved. So instead of treating extraction as a one-shot "trust the model" step, every output in this system is either checkable against its source, honestly labeled as missing rather than guessed, or confirmed back to the speaker before being finalized. Three features carry this philosophy:
+## 2. Audience
 
-- **Grounded extraction** — every extracted field is tagged with the sentence in the note that supports it, so a claim can be checked against the source instantly rather than by re-reading the whole note.
-- **Voice input with read-back confirmation** — when input is spoken, the system reads back what it understood *before* anything is finalized, so a transcription or extraction error can be caught and corrected in the moment — not after a wrong value is already sitting in a structured record.
-- **ICD-10 coding as a bonus tool-calling step** — extends the verified diagnosis into a standard clinical code, again through a checkable lookup rather than the model guessing a code from memory.
+**Doctors and medical staff** — the system is designed to help clinicians quickly track a patient's condition from unstructured notes (their own documentation, or a patient's self-report/journal entry) instead of re-reading everything by hand.
 
-The core text pipeline (Phases 1–5) is the non-negotiable graded deliverable. Voice, read-back, and grounding are additions layered on top, designed so the core still works completely on its own if any addition runs short on time.
+**Note on the dataset:** the available dataset (`clinical_notes.csv` + `patient_diaries.csv`, from Kaggle's "Patient Diaries and Clinical Notes Dataset") is mostly patient self-report / journal-style text focused on mood and depression, not full clinical encounters. This means fields like `medications`, `procedures`, and `follow_up` will often correctly return `null` — that's expected behavior given the input, not a bug, and is treated as such throughout evaluation (Section 7).
 
----
+## 3. Design Philosophy
 
-## 2. Tech Choices
-
-- **LLM:** Local via **Ollama**. Start with `qwen2.5:7b-instruct` (strong instruction-following for its size, good default for an M1 Air). Only move to a larger model (e.g. `qwen2.5:14b-instruct`, RAM-permitting) if V2/V3 prompt fixes can't solve a persistent failure category — and if that upgrade happens, document it as a finding, not just a fix.
-- **Transcription:** Local Whisper (`faster-whisper` or `whisper.cpp`) for the voice input path.
-- **Read-back / text-to-speech:** macOS's built-in `say` command — zero setup, already on the machine.
-- **Validation:** Pydantic models mirroring the JSON schema exactly.
-- **Dataset:** Kaggle "Patient Diaries and Clinical Notes Dataset" (synthetic/public — no real PHI).
+Every output must be **checkable**, not just trusted:
+- **Grounded extraction** — every field is tagged with the sentence in the note that supports it, so a doctor can verify a claim in seconds instead of re-reading the note.
+- **Validation before anything is finalized** — malformed or schema-violating output is caught and retried automatically.
+- **Read-back before voice input is processed** — if input comes from speech, the system confirms what it heard before it's ever sent to extraction.
 
 ---
 
-## 3. Pipeline Phases
+## 4. Tech Stack
 
-### Phase 1 — Data & Failure Taxonomy
-Read ~20–30 notes manually before writing any prompts. Build a checklist of things that could trip up extraction:
-- Negation ("denies fever", "no chest pain")
-- Implied vs. explicitly stated info
-- Multiple medications in one sentence
-- Ambiguous or missing dosages
-- Notes with no diagnosis at all
-- Family history vs. the patient's own history
+| Purpose | Tool / Library | Notes |
+|---|---|---|
+| Data handling | **pandas** | Reading/exploring `clinical_notes.csv` and `patient_diaries.csv` |
+| LLM inference | **Ollama** (Python client: `ollama` package, or raw REST calls to `localhost:11434`) | Local, no data leaves the machine |
+| Primary model | **`qwen2.5:7b-instruct`** | Good instruction-following for its size; fits comfortably on an M1 Air. Fallback to a larger Ollama model (e.g. `qwen2.5:14b-instruct`) only if a persistent failure category survives V2/V3 |
+| Structured output guardrail | Ollama's **`format: json`** mode | Baseline guarantee of parseable JSON (not schema-correctness) |
+| Schema validation | **Pydantic** | Models mirror the JSON schema exactly; used for both dev-time and runtime validation |
+| API layer | **FastAPI** | Single extraction endpoint; also a natural fit for later exposing the ICD-10 bonus route |
+| Evaluation | **pandas + scikit-learn** (`classification_report`, custom null-integrity check) | Two separate metrics, not one blended score (Section 7) |
+| ICD-10 bonus — code table | Public **ICD-10-CM CSV** (e.g. from CMS) | Local file, no external API call |
+| ICD-10 bonus — matching | **`rapidfuzz`** (fuzzy string matching) or sentence-embedding similarity | Deterministic lookup — the model never recalls a code from memory |
+| ICD-10 bonus — agent step | Ollama **tool/function calling** | Falls back to a direct code-side function call if the chosen model doesn't support tool calling reliably |
+| Speech-to-text | **`faster-whisper`** (local Whisper) | Runs locally on the M1; no audio leaves the machine |
+| Read-back / TTS | macOS built-in **`say`** command | Zero setup, already on the machine |
+| Version control | **Git + GitHub** | Repo already scaffolded (`README.md`, `docs/APPROACH.md`, `.gitignore`, `src/`, `notebooks/`, `data/`) |
 
-This taxonomy becomes both the design basis for the test set (Phase 2) and the rubric for judging each prompt version (Phase 3).
-
-### Phase 2 — Labeled Evaluation Set
-Hand-label ~15–20 notes with the expected "gold" JSON output. This is what makes "V2 is better than V1" a measurable, provable claim instead of an impression.
-
-### Phase 3 — Prompt Iteration Loop
-- **V1 (baseline):** schema + instructions, no examples. Run on the eval set, log every failure by category from the Phase 1 taxonomy.
-- **V2:** patch the worst offenders — explicit, repeated rules for "do not invent," strict null-handling.
-- **V3:** add few-shot examples targeting the hardest categories (negation, ambiguity); tighten format constraints.
-- **Final:** consolidate changes; write up *why* each change helped, backed by eval-set evidence — this write-up is the graded core of the assignment.
-
-**Grounded extraction:** each field in the schema also carries a `source_sentence` (or `null` if not present in the note). Reinforces the "no hallucination" requirement with something checkable, and doubles as a natural signal for low-confidence fields.
-
-**Completeness labeling:** the returned JSON stays exactly as specced — a field genuinely absent from the note is still just `null`, no schema changes. The distinction between "nothing to extract" and "extraction failed" is tracked separately, outside the API response, in the extraction logs and evaluation harness (e.g. "X% of nulls were confirmed-absent-from-note vs. Y% were validation failures"). This keeps the output format fully compliant while still surfacing the insight in the write-up.
-
-### Phase 4 — Schema Enforcement & Validation
-- Use Ollama's `format: json` mode as a baseline guardrail (guarantees parseable JSON, not schema-correctness).
-- Pydantic validates against the full schema.
-- On validation failure: re-prompt the LLM with the specific validation error and retry (1–2 attempts) before logging a hard failure.
-- Because local models are less consistently obedient than large hosted models, this retry/repair loop is load-bearing here, not just a nice-to-have.
-
-### Phase 5 — API & Evaluation Harness
-- Minimal API exposing a single extraction endpoint (note in → validated JSON out).
-- Evaluation harness runs the final prompt across the full labeled set and reports a concrete metric (e.g. field-level accuracy or exact-match rate) — proof of performance, not visual spot-checks.
-
-### Phase 6 — Voice Input with Read-Back Confirmation (Differentiator)
-This is the centerpiece "different approach" for the project — a genuine trust mechanism, not just an alternate input format.
-
-1. **Capture:** a doctor dictates a note as audio (recorded or a synthetic reading of an existing note for demo purposes).
-2. **Transcribe:** local Whisper converts audio → raw text transcript.
-3. **Read-back before anything is saved:** before the transcript is sent into extraction, the system speaks it back (macOS `say`) — "I heard: patient reports chest pain, denies shortness of breath." This catches transcription errors *before* they can propagate into a wrong diagnosis sitting silently in a structured record.
-4. **Confirm or correct:** in a live demo, the "doctor" can confirm or redo the dictation at this point. (For the written project, this can be shown as a manual confirmation step in the pipeline flow — full voice-based correction is a stretch goal, not required.)
-5. **Extract:** the confirmed transcript flows into the exact same Phase 3 extraction pipeline — no separate downstream logic needed.
-
-Framing for the write-up: *a verify-before-you-trust pipeline — audio in, read back for confirmation, structured JSON out, nothing touches the cloud at any step.*
+**Why these choices fit the constraints:** everything runs locally (Ollama, Whisper, `say`, the ICD-10 lookup) — no cloud API calls anywhere in the pipeline, which matters both for a *medical* project's privacy story and for staying within an M1 Air's resources. Every library is free, well-documented, and has no API key/cost concerns.
 
 ---
 
-## 4. Bonus — ICD-10 Coding via Tool-Calling Agent
+## 5. Pipeline Phases
 
-**Goal:** extend each verified diagnosis into a standard ICD-10 code, using a lookup tool rather than letting the model guess a code from memory (models are unreliable at recalling exact medical codes, so this must be a real lookup, not a hallucinated one).
+### Phase 1 — Read & Understand the Dataset
+Manually read a sample (20-30 notes) from both `clinical_notes.csv` and `patient_diaries.csv` using pandas. Note the difference in tone (third-person clinical vs. first-person diary) and build a running list of failure-prone patterns: negation, vague mood language, notes with zero clinical content, ambiguous severity. This list drives every phase after it.
 
-**How it will work:**
+### Phase 2 — Build a Small Labeled Evaluation Set
+Hand-write the correct JSON for ~15-20 notes, pulling a mix from both files and covering the hard cases found in Phase 1. Stored as a simple JSON/CSV file alongside the notebooks. This is the ground truth everything else gets measured against.
 
-1. **Build the lookup tool.** Download a public ICD-10-CM code table (CSV of code → description). Write a local Python function `icd10_lookup(diagnosis_text: str) -> list[{code, description, score}]` that matches the diagnosis text against the table using fuzzy string matching (e.g. `rapidfuzz`) or embedding similarity, returning the top 1–3 candidate codes.
-2. **Expose it as a tool.** Define `icd10_lookup` as a tool schema (name, description, parameters) in Ollama's tool-calling format. Ollama supports function/tool calling for compatible models (e.g. `qwen2.5`, `llama3.1`).
-3. **Agent step, after extraction is validated.** Once the core JSON (with a confirmed `diagnosis` field) passes validation, run a second short agent turn: give the model the diagnosis text and the `icd10_lookup` tool, and instruct it to call the tool to find the matching code rather than answer from memory. The model issues a tool call, the local function executes, and the result is returned to the model to produce the final `icd10_codes` field (code + description, tied back to the diagnosis).
-4. **Fallback plan.** If a given local model doesn't support tool calling reliably, fall back to calling `icd10_lookup` directly in code right after extraction (deterministic, no agent turn) — still satisfies the requirement, just without the "model decides to call a tool" agentic framing. This is documented as a graceful degradation, not a failure.
-5. **Validate output.** The final `icd10_codes` field only ever contains codes that came from the lookup table — never a code typed by the model directly — keeping the same "no hallucination" guarantee as the rest of the pipeline.
+### Phase 3 — Prompt Iteration Loop (V1 → V2 → V3 → Final)
+- **V1 (baseline):** schema + plain instructions, no examples, called via the `ollama` Python client. Run against the eval set, log every failure by category.
+- **V2:** patch the worst offenders — explicit, repeated "return null if not stated, never infer severity, never guess medications" rules.
+- **V3:** add 1-2 targeted few-shot examples for the hardest categories (negation, zero-clinical-content notes).
+- **Final:** consolidate; write up *why* each change helped, backed by before/after evidence from the eval set.
+
+**Grounded extraction** is built into the schema here: each field also carries a `source_sentence` (or `null`), giving doctors an instant way to verify any extracted claim.
+
+### Phase 4 — Runtime Validation & Repair Loop
+Distinct from Phase 3 — this runs every single time the system processes a note, not just during development:
+1. Ollama's `format: json` mode as a baseline guardrail.
+2. **Pydantic** validates against the full schema.
+3. On failure, re-prompt the model with the specific validation error and retry (1-2 attempts) via the same `ollama` client call, before logging a hard failure.
+
+### Phase 5 — API Endpoint
+A **FastAPI** app exposing a single extraction endpoint (note text in → validated JSON out), as required by the project brief.
+
+### Phase 6 — Evaluation
+Run the Final prompt across the full labeled eval set (pandas + scikit-learn) and report **two separate numbers**, not one blended score:
+- **Content-field accuracy** — for fields that usually have real values (symptoms, diagnosis, risk_indicators): standard accuracy against gold labels.
+- **Null-integrity check** — for fields that are usually absent (medications, procedures, follow_up): confirm the model correctly returns null when nothing is stated, and is correct on the rare cases when something is.
+
+### Phase 7 — Bonus: ICD-10 Tool-Calling
+Placed after Phases 1-6 are stable, since it depends on a confirmed diagnosis already existing.
+1. Local ICD-10-CM code table (CSV) + `rapidfuzz`-based lookup function.
+2. Exposed as a tool in Ollama's tool-calling format.
+3. After a diagnosis is validated, a short agent turn calls the tool to find the matching code — the model never recalls a code from memory.
+4. Fallback: if the local model doesn't support tool-calling reliably, call the lookup function directly in code (no agent turn) — same guarantee, simpler path.
+Given the dataset mostly yields a small, repetitive set of diagnoses (largely depression-related), this bonus is smaller in scope than it might sound.
+
+### Phase 8 — Speech-to-Text Input, With Guardrails (Optional Path)
+Voice is one *optional* way to get text into the pipeline — not a required path. The pipeline's real entry point is "clean note text," which can come from the dataset, typed input, or voice.
+
+**Guardrails before any transcript reaches the LLM** (using `faster-whisper`'s output):
+1. **Empty/garbage check** — if Whisper returns nothing or nonsense (silence, static), stop before sending anything to extraction.
+2. **Length/sanity check** — a suspiciously short transcript likely means a failed recording; flag it rather than process it.
+3. **Confidence check** — Whisper's per-segment confidence scores trigger a "please repeat" if too low, instead of silently proceeding.
+4. **Read-back confirmation** — the system speaks back what it understood via macOS `say` ("I heard: ...") before the transcript is finalized and sent to extraction.
+
+Only a transcript that passes all of this is treated the same as any other clean text input to Phase 3.
 
 ---
 
-## 5. Build Order (Solo, Realistic Sequencing)
+## 6. Build Order
 
-1. Manual note review + failure taxonomy
-2. Label the small eval set
-3. V1 prompt → run → log failures
-4. V2 → V3 → Final prompt, each measured against the eval set
-5. Add `source_sentence` grounding + completeness labeling to the schema and prompt
-6. Pydantic validation + retry/repair loop
-7. API endpoint
-8. Evaluation harness across the full labeled set
-9. Voice input + read-back confirmation layer (Whisper + `say` → same pipeline)
-10. ICD-10 tool-calling bonus, if time allows
+1. Read & understand the dataset (Phase 1) — pandas
+2. Build the labeled eval set (Phase 2)
+3. Prompt iteration V1 → V2 → V3 → Final, with grounded extraction (Phase 3) — Ollama
+4. Runtime validation & repair loop (Phase 4) — Pydantic
+5. API endpoint (Phase 5) — FastAPI
+6. Evaluation — split metrics (Phase 6) — pandas/scikit-learn
+7. ICD-10 bonus (Phase 7) — rapidfuzz + Ollama tool calling
+8. Speech-to-text with guardrails, as an optional input path (Phase 8) — faster-whisper + macOS `say`
 
 ---
 
-## 6. What Makes This Approach Defensible
+## 7. What Makes This Approach Defensible
 
-- Every design choice ties back to a real requirement in the brief (grounding → "no hallucination"; retry/repair → schema compliance; eval harness → "not just visual inspection"; voice → the instructor's own example).
-- The core deliverable is fully functional without the voice/read-back layer — the differentiator is additive risk, not a dependency.
-- The read-back step addresses the actual failure mode structured-extraction systems are dangerous for: a wrong value that looks exactly like a right one once it's in JSON.
-- Local-only architecture (Ollama + local Whisper + local ICD-10 lookup) is a coherent, easy-to-explain story for a *medical* project specifically: no patient data ever leaves the machine, even during transcription or coding.
+- Every design choice ties back to a real requirement in the brief: grounding → "no hallucination"; validation/repair → schema compliance; split evaluation → honest measurement given the dataset's actual content; voice → the instructor's own example of a different approach.
+- The doctor-facing audience is stated explicitly, along with an honest account of where the dataset currently falls short of full clinical documentation (no medications/procedures) — framed as a scoping decision, not an oversight.
+- Every tool in the stack is free, local, and requires no API key — keeping the whole system privacy-preserving and cost-free to run, which matters both technically (M1 Air resource limits) and narratively (a medical project with no cloud dependency).
+- The core pipeline (Phases 1-6) is fully functional and gradeable without voice or the bonus — both are additive, not dependencies.

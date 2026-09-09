@@ -2,7 +2,7 @@
 
 ## 1. Project Summary
 
-MedExtract AI takes an unstructured clinical/patient note and uses a local LLM (via Ollama) to extract only the information explicitly stated into a fixed JSON schema (chief complaint, symptoms, diagnosis, medical history, medications, procedures, follow-up, summary, risk indicators, urgency). The system must never invent, diagnose, or prescribe — extraction only, with everything traceable back to what's actually written. The extracted data is then shown to the doctor through a **Streamlit interface styled like a prescription/report**, not as raw JSON.
+MedExtract AI takes an unstructured clinical/patient note and uses an LLM to extract structured medical information into a fixed JSON schema (chief complaint, symptoms, diagnosis, medical history, medications, procedures, follow-up, summary, risk indicators, urgency). Per the instructor's direction, the system now goes beyond pure extraction and **reasons toward a diagnosis** — but that reasoning is grounded in retrieved, real diagnostic criteria (not the model's unaided memory), shown with explicit supporting evidence and a confidence level, so every diagnosis is a checkable clinical suggestion for the doctor to confirm, not an unsupported guess. Extraction fields that are directly stated in the note (symptoms, medications, etc.) remain extraction-only, grounded to their source sentence, exactly as before — only the diagnosis step now involves reasoning. The result is then shown to the doctor through a **Streamlit interface styled like a prescription/report**, not as raw JSON.
 
 ## 2. Audience
 
@@ -13,7 +13,8 @@ MedExtract AI takes an unstructured clinical/patient note and uses a local LLM (
 ## 3. Design Philosophy
 
 Every output must be **checkable**, not just trusted:
-- **Grounded extraction** — every field is tagged with the sentence in the note that supports it, so a doctor can verify a claim in seconds instead of re-reading the note.
+- **Grounded extraction** — every directly-stated field is tagged with the sentence in the note that supports it, so a doctor can verify a claim in seconds instead of re-reading the note.
+- **Grounded diagnosis, not a guess** — the diagnosis step retrieves real diagnostic criteria (e.g. DSM-5-style criteria) and requires the model to show which criteria the note matches and how confident it is, rather than pattern-matching from memory. This is the one place reasoning replaces pure extraction, and it's held to a higher bar of evidence *because* of that.
 - **Validation before anything is finalized** — malformed or schema-violating output is caught and retried automatically.
 - **A familiar, prescription-style presentation** — the doctor never has to read raw JSON; the same validated, grounded data is rendered in a clean, clinical-looking layout they can scan the way they'd scan any other patient document.
 
@@ -24,9 +25,10 @@ Every output must be **checkable**, not just trusted:
 | Purpose | Tool / Library | Notes |
 |---|---|---|
 | Data handling | **pandas** | Reading/exploring `clinical_notes.csv` and `patient_diaries.csv` |
-| LLM inference | **Ollama** (Python client: `ollama` package, or raw REST calls to `localhost:11434`) | Local, no data leaves the machine |
-| Primary model | **`qwen2.5:7b-instruct`** | Good instruction-following for its size; fits comfortably on an M1 Air. Fallback to a larger Ollama model (e.g. `qwen2.5:14b-instruct`) only if a persistent failure category survives V2/V3 |
-| Structured output guardrail | Ollama's **`format: json`** mode | Baseline guarantee of parseable JSON (not schema-correctness) |
+| LLM inference | **[Provider TBD — API-based, e.g. Claude/GPT/Gemini]** | Switched from local Ollama to a hosted API per instructor's request, for better reasoning quality |
+| Diagnostic knowledge base | Small curated **DSM-5-style criteria** file (markdown/JSON), stored locally | A short, accurate reference document — not the full DSM — covering the diagnoses relevant to this dataset (primarily depression) |
+| Diagnostic retrieval (RAG) | **`chromadb`** (local vector store) + a local embedding model (e.g. `sentence-transformers`) | Retrieves the relevant criteria before the model reasons toward a diagnosis, so it's checking real clinical standards, not guessing from memory |
+| Structured output guardrail | Provider's native JSON/structured-output mode (varies by API) | Baseline guarantee of parseable JSON |
 | Schema validation | **Pydantic** | Models mirror the JSON schema exactly; used for both dev-time and runtime validation |
 | API layer | **FastAPI** | Single extraction endpoint; also a natural fit for later exposing the ICD-10 bonus route |
 | Doctor-facing UI | **Streamlit** | Renders the validated JSON as a prescription/report-style view, not raw JSON |
@@ -35,7 +37,7 @@ Every output must be **checkable**, not just trusted:
 | ICD-10 bonus — agent step | **MCP** (Model Context Protocol) — `mcp` Python SDK | Local MCP server exposes `icd10_lookup` (which internally calls the API); the extraction agent acts as an MCP client. Falls back to a direct code-side function call if a full MCP setup isn't feasible in time |
 | Version control | **Git + GitHub** | Repo already scaffolded (`README.md`, `docs/APPROACH.md`, `.gitignore`, `src/`, `notebooks/`, `data/`) |
 
-**Why these choices fit the constraints:** the core pipeline (Ollama, Pydantic, FastAPI) runs entirely locally — no cloud API calls, no API keys, no cost, and nothing about the note itself leaves the machine, which matters for a *medical* project's privacy story and for staying within an M1 Air's resources. The one exception is the ICD-10 bonus, which calls a free public API for the diagnosis code lookup (see Phase 7) — everything else stays local.
+**Why these choices fit the constraints:** the LLM now runs via a hosted API (per the instructor's request, for better reasoning quality) rather than locally — this is a deliberate trade-off: the note text now leaves the machine during extraction/diagnosis, in exchange for stronger model reasoning. Everything else (Pydantic, FastAPI, Streamlit, the diagnostic knowledge base, the vector store) stays local. The ICD-10 bonus is a second, separate point of external calls (see Phase 7).
 
 ---
 
@@ -48,26 +50,38 @@ Manually read a sample (20-30 notes) from both `clinical_notes.csv` and `patient
 Hand-write the correct JSON for ~15-20 notes, pulling a mix from both files and covering the hard cases found in Phase 1. Stored as a simple JSON/CSV file alongside the notebooks. This is the ground truth everything else gets measured against.
 
 ### Phase 3 — Prompt Iteration Loop (V1 → V2 → V3 → Final)
-- **V1 (baseline):** schema + plain instructions, no examples, called via the `ollama` Python client. Run against the eval set, log every failure by category.
+- **V1 (baseline):** schema + plain instructions, no examples, called via the provider's API client. Run against the eval set, log every failure by category.
 - **V2:** patch the worst offenders — explicit, repeated "return null if not stated, never infer severity, never guess medications" rules.
 - **V3:** add 1-2 targeted few-shot examples for the hardest categories (negation, zero-clinical-content notes).
 - **Final:** consolidate; write up *why* each change helped, backed by before/after evidence from the eval set.
 
 **Grounded extraction** is built into the schema here: each field also carries a `source_sentence` (or `null`), giving doctors an instant way to verify any extracted claim.
 
+### Phase 3.5 — Grounded Diagnostic Reasoning (RAG)
+Per the instructor's request, the diagnosis field moves from pure extraction to actual reasoning — but grounded in real clinical criteria, not the model's memory. This is the one legitimate use of RAG in the project.
+
+1. **Build the knowledge base:** a small, curated file of real diagnostic criteria (DSM-5-style, focused on what the dataset actually contains — primarily depression), stored locally, not the full DSM.
+2. **Retrieve before reasoning:** when a note is being diagnosed, the relevant criteria are pulled from the knowledge base (via `chromadb` + a local embedding model) and included in the prompt, so the model reasons against real standards.
+3. **Require explicit evidence:** the model must state which criteria the note matches and how (e.g. "depressed mood: present — 'feeling low most days'; anhedonia: present — 'stopped enjoying things'"), not just output a diagnosis label.
+4. **Require a confidence level:** if the note only weakly matches criteria, the diagnosis is returned with a low-confidence flag rather than stated as certain — this becomes a field the doctor sees directly in the Streamlit view.
+5. **Optional critic pass:** a second short check verifies the stated reasoning actually matches the retrieved criteria, catching cases where the model asserts a match that isn't really there.
+
+**Framing for the write-up:** the system reasons toward a diagnosis, but every diagnosis is a checkable clinical suggestion — grounded in retrieved criteria, shown with evidence and confidence — for the doctor to confirm, not an unsupported guess.
+
 ### Phase 4 — Runtime Validation & Repair Loop
 Distinct from Phase 3 — this runs every single time the system processes a note, not just during development:
-1. Ollama's `format: json` mode as a baseline guardrail.
+1. The provider's native JSON/structured-output mode as a baseline guardrail.
 2. **Pydantic** validates against the full schema.
-3. On failure, re-prompt the model with the specific validation error and retry (1-2 attempts) via the same `ollama` client call, before logging a hard failure.
+3. On failure, re-prompt the model with the specific validation error and retry (1-2 attempts) via the same API call, before logging a hard failure.
 
 ### Phase 5 — API Endpoint
 A **FastAPI** app exposing a single extraction endpoint (note text in → validated JSON out), as required by the project brief.
 
 ### Phase 6 — Evaluation
-Run the Final prompt across the full labeled eval set (pandas + scikit-learn) and report **two separate numbers**, not one blended score:
-- **Content-field accuracy** — for fields that usually have real values (symptoms, diagnosis, risk_indicators): standard accuracy against gold labels.
+Run the Final prompt across the full labeled eval set (pandas + scikit-learn) and report **three separate measures**, not one blended score:
+- **Content-field accuracy** — for extraction fields that usually have real values (symptoms, risk_indicators): standard accuracy against gold labels.
 - **Null-integrity check** — for fields that are usually absent (medications, procedures, follow_up): confirm the model correctly returns null when nothing is stated, and is correct on the rare cases when something is.
+- **Diagnostic reasoning quality** — since diagnosis now involves reasoning (Phase 3.5), evaluate it separately: is the stated diagnosis correct against gold labels, does the cited evidence actually appear in the note, and is the confidence level appropriately calibrated (low confidence on ambiguous notes, high confidence on clear-cut ones)? A diagnosis being "right" isn't enough on its own — the reasoning behind it needs to check out too.
 
 ### Phase 7 — Bonus: ICD-10 Lookup via MCP + API
 Placed after Phases 1-6 are stable, since it depends on a confirmed diagnosis already existing. This directly implements the brief's own suggested bonus ("turn it into an agent with an MCP/tool call for ICD-10 lookup").
@@ -102,7 +116,8 @@ This is the differentiator replacing voice input — instead of a doctor reading
 
 1. Read & understand the dataset (Phase 1) — pandas
 2. Build the labeled eval set (Phase 2)
-3. Prompt iteration V1 → V2 → V3 → Final, with grounded extraction (Phase 3) — Ollama
+3. Prompt iteration V1 → V2 → V3 → Final, with grounded extraction (Phase 3) — hosted LLM API
+3.5. Build the diagnostic knowledge base and RAG retrieval for grounded diagnosis (Phase 3.5) — chromadb
 4. Runtime validation & repair loop (Phase 4) — Pydantic
 5. API endpoint (Phase 5) — FastAPI
 6. Evaluation — split metrics (Phase 6) — pandas/scikit-learn
@@ -113,8 +128,8 @@ This is the differentiator replacing voice input — instead of a doctor reading
 
 ## 7. What Makes This Approach Defensible
 
-- Every design choice ties back to a real requirement in the brief: grounding → "no hallucination"; validation/repair → schema compliance; split evaluation → honest measurement given the dataset's actual content.
+- Every design choice ties back to a real requirement: grounded extraction → "no hallucination" on stated facts; grounded diagnostic reasoning (RAG over real criteria, with evidence and confidence) → the instructor's request to let the model diagnose, without opening the door to unsupported guesses; validation/repair → schema compliance; split evaluation → honest measurement given the dataset's actual content.
 - The doctor-facing audience is stated explicitly, along with an honest account of where the dataset currently falls short of full clinical documentation (no medications/procedures) — framed as a scoping decision, not an oversight.
-- The core pipeline is local, free, and requires no API key, which matters both technically (M1 Air resource limits) and narratively (privacy-first for a medical project). The ICD-10 bonus is the one deliberate exception — it calls a free public API — and that trade-off is stated explicitly rather than glossed over.
-- The prescription-style Streamlit view directly serves the stated audience: doctors get a familiar, scannable document instead of a technical JSON blob, with grounding built into the presentation itself, not buried in the data.
+- Two deliberate, clearly-stated trade-offs against "fully local": the LLM now runs via a hosted API (better reasoning, per the instructor), and the ICD-10 bonus calls a free public API. Both are named explicitly rather than glossed over.
+- The prescription-style Streamlit view directly serves the stated audience: doctors get a familiar, scannable document instead of a technical JSON blob, with grounding — for both extracted facts and the diagnosis's reasoning — built into the presentation itself.
 - The core pipeline (Phases 1-6) is fully functional and gradeable without the UI or the bonus — both are additive, not dependencies.

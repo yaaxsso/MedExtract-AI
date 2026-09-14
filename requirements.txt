@@ -1,0 +1,11 @@
+fastapi>=0.128.6
+uvicorn[standard]>=0.30
+pydantic>=2.7
+python-dotenv>=1.0
+requests>=2.31
+google-genai>=1.0
+# Pinned below 2.x: FastMCP was renamed/restructured to MCPServer in mcp v2, and
+# google-genai's MCP tool support (the `tools=[session]` integration used in
+# src/api.py) is still experimental — it isn't confirmed to work against v2's
+# internals yet. Stay on the 1.x line until that's verified.
+mcp>=1.2,<2

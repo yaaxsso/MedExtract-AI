@@ -1,6 +1,7 @@
-# Data
-data/
-*.csv
+# Data — only the raw Kaggle source stays out (redistribution/license reasons).
+# Everything else (labeled gold data, eval sets, batch results) is a graded
+# deliverable and must be tracked.
+data/raw/
 
 # Python
 __pycache__/

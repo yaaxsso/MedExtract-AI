@@ -1,0 +1,58 @@
+text,label
+Patient demonstrated symptoms of depression; further assessment needed.,depression
+"Patient shows signs of depression, feeling low and fatigued.",depression
+"Patient has fluctuating moods, feeling sad.",depression
+"Patient indicates a lack of interest in activities, feeling hopeful.",no depression
+Patient reports feeling low and unable to concentrate.,depression
+Patient expressed feelings of being overwhelmed and lacks motivation.,no depression
+"Patient indicates a lack of interest in activities, feeling overwhelmed.",no depression
+Patient expressed feelings of being low and lacks motivation.,no depression
+Patient has been experiencing overwhelmed thoughts and needs support.,no depression
+Patient feels unstable; a referral to a psychiatrist may be necessary.,no depression
+Patient feels better; a referral to a psychiatrist may be necessary.,no depression
+"Patient has fluctuating moods, feeling better.",no depression
+Patient expressed feelings of being sad and lacks motivation.,depression
+Patient has been experiencing better thoughts and needs support.,no depression
+Patient has been experiencing sad thoughts and needs support.,depression
+"Patient indicates a lack of interest in activities, feeling sad.",depression
+"Patient has fluctuating moods, feeling unstable.",no depression
+Patient has been experiencing hopeful thoughts and needs support.,no depression
+"Patient shows signs of depression, feeling isolated and fatigued.",depression
+Patient reports feeling anxious and unable to concentrate.,no depression
+Patient expressed feelings of being hopeful and lacks motivation.,no depression
+"Patient has fluctuating moods, feeling overwhelmed.",depression
+"Patient has fluctuating moods, feeling isolated.",depression
+Patient reports feeling hopeful and unable to concentrate.,no depression
+Patient reports feeling unstable and unable to concentrate.,no depression
+Patient feels overwhelmed; a referral to a psychiatrist may be necessary.,no depression
+"Patient has fluctuating moods, feeling hopeful.",no depression
+Patient has been experiencing anxious thoughts and needs support.,depression
+Patient has been experiencing unstable thoughts and needs support.,depression
+Patient has been experiencing low thoughts and needs support.,no depression
+Patient expressed feelings of being isolated and lacks motivation.,depression
+"Patient shows signs of depression, feeling anxious and fatigued.",depression
+Patient reports feeling better and unable to concentrate.,no depression
+Patient expressed feelings of being anxious and lacks motivation.,no depression
+Patient feels sad; a referral to a psychiatrist may be necessary.,depression
+"Patient indicates a lack of interest in activities, feeling unstable.",depression
+"Patient shows signs of depression, feeling better and fatigued.",depression
+"Patient indicates a lack of interest in activities, feeling isolated.",depression
+Patient feels isolated; a referral to a psychiatrist may be necessary.,depression
+"Patient shows signs of depression, feeling sad and fatigued.",depression
+"Patient indicates a lack of interest in activities, feeling low.",no depression
+Patient feels hopeful; a referral to a psychiatrist may be necessary.,no depression
+"Patient has fluctuating moods, feeling low.",depression
+Patient reports feeling isolated and unable to concentrate.,depression
+Patient expressed feelings of being unstable and lacks motivation.,no depression
+Patient feels low; a referral to a psychiatrist may be necessary.,depression
+Patient feels anxious; a referral to a psychiatrist may be necessary.,depression
+Patient reports feeling overwhelmed and unable to concentrate.,depression
+"Patient has fluctuating moods, feeling anxious.",depression
+"Patient shows signs of depression, feeling hopeful and fatigued.",depression
+"Patient shows signs of depression, feeling unstable and fatigued.",depression
+Patient expressed feelings of being better and lacks motivation.,no depression
+"Patient indicates a lack of interest in activities, feeling anxious.",no depression
+Patient reports feeling sad and unable to concentrate.,depression
+Patient has been experiencing isolated thoughts and needs support.,depression
+"Patient shows signs of depression, feeling overwhelmed and fatigued.",depression
+"Patient indicates a lack of interest in activities, feeling better.",no depression

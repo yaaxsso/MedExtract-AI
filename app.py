@@ -211,7 +211,14 @@ if analyze:
 
         meds_html = ""
         if not_mentioned(suggested_meds):
-            meds_html = "<div style='color:#888;font-style:italic;'>No medication suggested from this note.</div>"
+            reason_bits = []
+            if confidence:
+                reason_bits.append(f"confidence: {confidence}")
+            if reasoning.get("reasoning_notes"):
+                reason_bits.append(reasoning["reasoning_notes"])
+            reason_line = f" <span style='color:#aaa;'>({' — '.join(reason_bits)})</span>" if reason_bits else ""
+            meds_html = (f"<div style='color:#888;font-style:italic;'>"
+                         f"No medication suggested from this note.{reason_line}</div>")
         else:
             if dosing_note:
                 meds_html += f"<div class='rx-flag'>⚠ {dosing_note}</div>"

@@ -16,9 +16,41 @@ Keeping the implementation here (instead of duplicating it in both places)
 means the MCP path and the fallback path are guaranteed to behave identically.
 """
 import re
+import time
+import threading
+from functools import wraps
+
 import xml.etree.ElementTree as ET
 
 import requests
+
+_CACHE_TTL_SECONDS = 3600  # 1 hour
+_cache_lock = threading.Lock()
+
+
+def _ttl_cache(ttl_seconds: float = _CACHE_TTL_SECONDS):
+    def decorator(func):
+        cache: dict = {}
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            now = time.monotonic()
+            with _cache_lock:
+                cached = cache.get(key)
+                if cached is not None:
+                    value, expires_at = cached
+                    if now < expires_at:
+                        return value
+            value = func(*args, **kwargs)
+            with _cache_lock:
+                cache[key] = (value, now + ttl_seconds)
+            return value
+
+        wrapper.cache_clear = lambda: cache.clear()
+        return wrapper
+
+    return decorator
 
 
 def clean_html(text):
@@ -26,7 +58,7 @@ def clean_html(text):
         return None
     return re.sub(r"<[^>]+>", "", text).strip()
 
-
+@_ttl_cache()
 def condition_info_lookup(condition_text: str, max_results: int = 1) -> dict:
     """Look up authoritative medical info about a condition from MedlinePlus. Use this to verify a diagnosis before stating it."""
     url = "https://wsearch.nlm.nih.gov/ws/query"
@@ -45,7 +77,7 @@ def condition_info_lookup(condition_text: str, max_results: int = 1) -> dict:
         })
     return {"found": bool(results), "results": results}
 
-
+@_ttl_cache()
 def medication_lookup(drug_name: str) -> dict:
     """Verify a medication name is real before suggesting it. If found is False, do not suggest that medication."""
     url = "https://rxnav.nlm.nih.gov/REST/rxcui.json"
@@ -58,7 +90,7 @@ def medication_lookup(drug_name: str) -> dict:
         return {"found": False, "message": f"{drug_name!r} is not a recognized medication in RxNorm"}
     return {"found": True, "rxcui": rxcui_list[0], "name": drug_name}
 
-
+@_ttl_cache()
 def dosing_lookup(drug_name: str) -> dict:
     """Get standard FDA label dosing text for an already-verified medication. Generic reference only, never a personalized dose."""
     url = "https://api.fda.gov/drug/label.json"
@@ -80,7 +112,7 @@ def dosing_lookup(drug_name: str) -> dict:
         "note": "Standard reference dose from FDA label — not patient-specific, for clinician review.",
     }
 
-
+@_ttl_cache()
 def icd10_lookup(diagnosis_text: str, max_results: int = 3) -> dict:
     """Look up official ICD-10-CM candidate codes for a confirmed diagnosis. Returns up to
     max_results candidates — keep all of them, do not narrow to one yourself. Never state a

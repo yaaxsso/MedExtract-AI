@@ -11,3 +11,4 @@ pandas>=2.0
 # src/api.py) is still experimental — it isn't confirmed to work against v2's
 # internals yet. Stay on the 1.x line until that's verified.
 mcp>=1.2,<2
+reportlab>=4.0

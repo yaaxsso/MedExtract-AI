@@ -19,11 +19,14 @@ docs/APPROACH.md — and says so in the result.
 import os
 import re
 import json
+import time
 import asyncio
 import logging
+import threading
+from collections import defaultdict, deque
 from typing import Optional, List, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header, Request
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
@@ -58,6 +61,43 @@ _clients = [genai.Client(api_key=k) for k in _api_keys]
 MODEL_NAME = "gemini-3.5-flash-lite"
 _current_client_index = 0
 
+_REQUIRED_API_KEY = os.environ.get("MEDEXTRACT_API_KEY")
+_RATE_LIMIT_PER_MINUTE = int(os.environ.get("MEDEXTRACT_RATE_LIMIT_PER_MINUTE", "20"))
+_RATE_WINDOW_SECONDS = 60.0
+
+if not _REQUIRED_API_KEY:
+    logger.warning(
+        "MEDEXTRACT_API_KEY is not set — /extract is running with NO API key "
+        "authentication. Fine for local/dev use; set MEDEXTRACT_API_KEY before "
+        "exposing this endpoint anywhere reachable by others."
+    )
+
+_rate_lock = threading.Lock()
+_request_log: dict[str, deque] = defaultdict(deque)
+
+
+def require_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")) -> str:
+    if _REQUIRED_API_KEY:
+        if not x_api_key or x_api_key != _REQUIRED_API_KEY:
+            raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header.")
+        return x_api_key
+    return "anonymous"
+
+
+def enforce_rate_limit(client_id: str) -> None:
+    now = time.monotonic()
+    with _rate_lock:
+        q = _request_log[client_id]
+        while q and now - q[0] > _RATE_WINDOW_SECONDS:
+            q.popleft()
+        if len(q) >= _RATE_LIMIT_PER_MINUTE:
+            retry_after = max(0.0, _RATE_WINDOW_SECONDS - (now - q[0]))
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded: max {_RATE_LIMIT_PER_MINUTE} requests/minute. "
+                       f"Retry in ~{retry_after:.0f}s.",
+            )
+        q.append(now)
 
 def generate_with_fallback(**kwargs):
     global _current_client_index
@@ -272,12 +312,22 @@ Rules:
     Disorder", "Adjustment Disorder"). Two vague self-reported phrases ("feeling low", "doesn't want
     to talk to anyone") are not sufficient evidence for a formally-named disorder, even though they
     are sufficient to flag depressive symptoms worth a clinician's attention.
-  - "high" confidence (3+ indicators, or the text itself uses an explicit diagnosis word / states a
+   - "high" confidence (3+ indicators, or the text itself uses an explicit diagnosis word / states a
     clinical referral) may use a specific named disorder — but only if the text contains evidence of
     THAT diagnosis's actual defining features, not just any negative-sounding phrase. "Fluctuating
     moods" alone, with no mania/hypomania language, is still not evidence for Bipolar Disorder at
     any confidence level — use "Mood disturbance, unspecified" instead, and never suggest a
     narrow-therapeutic-window medication (e.g. lithium) from weak, nonspecific evidence.
+  - DURATION IS A DEFINING FEATURE, NOT JUST A DETAIL — CHECK IT EXPLICITLY BEFORE NAMING A NAMED
+    DISORDER: Major Depressive Disorder specifically requires symptoms present most of the day,
+    nearly every day, for at least 2 weeks. Generalized Anxiety Disorder requires excessive worry
+    most days for at least 6 months. If the note states a duration shorter than the disorder's own
+    minimum (e.g. "this week", "past few days", "today"), or states no duration at all, that alone
+    disqualifies the named disorder regardless of indicator count — use the matching "unspecified"
+    descriptor instead (e.g. "Depressive symptoms, unspecified") and say explicitly in
+    reasoning_notes that duration evidence was insufficient for the named disorder even though
+    indicator count was high. Do not let a high indicator count substitute for a duration
+    requirement you have no evidence for.
   - DO NOT INVENT EPISODE/SEVERITY QUALIFIERS: never describe a condition as "recurrent",
     "severe", "chronic", or similar unless the note explicitly documents that history (e.g. past
     episodes, stated duration/severity). A first-time or undated mention must map to an
@@ -438,9 +488,15 @@ def health():
 
 
 @app.post("/extract")
-async def extract_note(note: NoteInput):
+async def extract_note(
+    note: NoteInput,
+    request: Request,
+    client_id: str = Depends(require_api_key),
+):
     if not note.text or not note.text.strip():
         raise HTTPException(status_code=400, detail="`text` must not be empty.")
+    rate_key = client_id if client_id != "anonymous" else (request.client.host if request.client else "unknown")
+    enforce_rate_limit(rate_key)
     try:
         return await process_note(note.text)
     except Exception as e:

@@ -17,7 +17,11 @@ from datetime import datetime
 import requests
 import streamlit as st
 
+from src.pdf_export import generate_prescription_pdf 
+
 API_URL = os.environ.get("MEDEXTRACT_API_URL", "http://127.0.0.1:8000")
+_CLIENT_API_KEY = os.environ.get("MEDEXTRACT_API_KEY")
+_AUTH_HEADERS = {"X-API-Key": _CLIENT_API_KEY} if _CLIENT_API_KEY else {}
 
 st.set_page_config(page_title="MedExtract AI", page_icon="🩺", layout="centered")
 
@@ -35,9 +39,21 @@ URGENCY_STYLE = {
 st.markdown("""
 <style>
 @media print {
-    [data-testid="stSidebar"], [data-testid="stHeader"], .stButton,
-    .stTextArea, .stTextInput, #print-btn-wrapper, .no-print { display: none !important; }
-    .rx-pad { border: none !important; box-shadow: none !important; }
+    /* Whitelist approach: hide EVERYTHING on the page, then explicitly
+       un-hide only the .rx-pad prescription card and its contents. This
+       is robust to whatever else Streamlit renders (title, captions,
+       warnings, the debug expander, etc.) without having to list every
+       element by name. */
+    body * { visibility: hidden; }
+    .rx-pad, .rx-pad * { visibility: visible; }
+    .rx-pad {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        border: none !important;
+        box-shadow: none !important;
+    }
 }
 .rx-pad {
     font-family: 'Georgia', 'Times New Roman', serif;
@@ -166,7 +182,7 @@ analyze = st.button("Analyze note", type="primary", disabled=not note_text.strip
 if analyze:
     with st.spinner("Extracting, validating, and verifying against live medical sources..."):
         try:
-            resp = requests.post(f"{api_url}/extract", json={"text": note_text}, timeout=120)
+            resp = requests.post(f"{api_url}/extract", json={"text": note_text}, headers=_AUTH_HEADERS, timeout=120)
             resp.raise_for_status()
             result = resp.json()
         except Exception as e:
@@ -185,23 +201,45 @@ if analyze:
         if not reasoning_ok:
             st.warning("Diagnosis reasoning failed — no diagnosis/medication section below.")
 
-        st.markdown(
-            '<div id="print-btn-wrapper">'
-            '<button onclick="window.print()" '
-            'style="padding:8px 18px;font-size:1em;border-radius:6px;border:1px solid #999;'
-            'background:#f0f0f0;cursor:pointer;">🖨️ Print this page</button>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-        st.caption("If nothing happens, use your browser's print shortcut (Ctrl/Cmd+P) — "
-                   "only the summary below will print either way.")
-
         diagnosis = reasoning.get("diagnosis")
         confidence = reasoning.get("confidence")
         icd10_candidates = reasoning.get("icd10_candidates") or []
         suggested_meds = reasoning.get("suggested_medications") or []
         unverified = reasoning.get("unverified_medications_mentioned")
         dosing_note, per_drug_dose = parse_dosing(reasoning.get("dosing_reference"), suggested_meds)
+
+        pdf_bytes = generate_prescription_pdf(
+            extraction=extraction,
+            reasoning=reasoning,
+            per_drug_dose=per_drug_dose,
+            dosing_note=dosing_note,
+            note_ref=note_ref,
+            clinic_name=clinic_name,
+        )
+        file_stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        file_ref = re.sub(r"[^A-Za-z0-9_-]+", "_", note_ref.strip()) if note_ref.strip() else "summary"
+
+        col_dl, col_print = st.columns(2)
+        with col_dl:
+            st.download_button(
+                "⬇️ Download prescription (PDF)",
+                data=pdf_bytes,
+                file_name=f"prescription_{file_ref}_{file_stamp}.pdf",
+                mime="application/pdf",
+                type="primary",
+                use_container_width=True,
+            )
+        with col_print:
+            st.markdown(
+                '<div id="print-btn-wrapper">'
+                '<button onclick="window.print()" '
+                'style="width:100%;padding:8px 18px;font-size:1em;border-radius:6px;border:1px solid #999;'
+                'background:#f0f0f0;color:#1a1a1a;cursor:pointer;">🖨️ Print instead</button>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+        st.caption("Download saves a single-page PDF straight to your computer. "
+                   "\"Print instead\" opens your browser's print dialog if you'd rather print on paper.")
 
         icd10_html = ""
         if icd10_candidates:
